@@ -17,6 +17,7 @@
 # MH20151102
 
 import itertools
+import os
 from ctypes import *
 
 libalign = cdll.LoadLibrary('src/libalign.so')

@@ -8,13 +8,10 @@ from functools import partial
 import torch
 from tqdm import tqdm
 
-import dataloader
-import model
-import transformer
-import util
-from decoding import Decode, get_decode_fn
-from model import dummy_mask
-from trainer import BaseTrainer
+from src import util, model, transformer, dataloader
+from src.decoding import get_decode_fn, Decode
+from src.model import dummy_mask
+from src.trainer import BaseTrainer
 
 tqdm.monitor_interval = 0
 
@@ -81,6 +78,7 @@ class Trainer(BaseTrainer):
         parser.add_argument('--decode', default=Decode.greedy, type=Decode, choices=list(Decode))
         parser.add_argument('--mono', default=False, action='store_true', help='enforce monotonicity')
         parser.add_argument('--bestacc', default=False, action='store_true', help='select model by accuracy only')
+        parser.add_argument('--use_copy', help="bool flag to use copy mechanism")
         # yapf: enable
 
     def load_data(self, dataset, train, dev, test):
@@ -165,6 +163,7 @@ class Trainer(BaseTrainer):
         kwargs['src_c2i'] = self.data.source_c2i
         kwargs['trg_c2i'] = self.data.target_c2i
         kwargs['attr_c2i'] = self.data.attr_c2i
+        kwargs['use_copy'] = params.use_copy
         model_class = None
         indtag, mono = True, True
         # yapf: disable
@@ -251,6 +250,7 @@ class Trainer(BaseTrainer):
         self.model.eval()
         sampler, nb_instance = self.iterate_instance(mode)
         decode_fn.reset()
+
         results = self.evaluator.evaluate_all(sampler, nb_instance, self.model,
                                               decode_fn)
         decode_fn.reset()
@@ -265,22 +265,44 @@ class Trainer(BaseTrainer):
         cnt = 0
         sampler, nb_instance = self.iterate_instance(mode)
         decode_fn.reset()
-        with open(f'{write_fp}.{mode}.tsv', 'w') as fp:
+
+        outputs = []
+        for src, trg in tqdm(sampler(), total=nb_instance):
+            pred, gen_prob, _ = decode_fn(self.model, src)
+            dist = util.edit_distance(pred, trg.view(-1).tolist()[1:-1])
+
+            src_mask = dummy_mask(src)
+            trg_mask = dummy_mask(trg)
+            data = (src, src_mask, trg, trg_mask)
+            loss = self.model.get_loss(data).item()
+            src = self.data.decode_source(src)
+            trg = self.data.decode_target(trg)[1:-1]
+            pred = self.data.decode_target(pred)
+            outputs.append([pred, trg, loss, dist, src, gen_prob])
+
+        with open(f'{write_fp}.{mode}.tsv', 'w', encoding='utf-8') as fp:
             fp.write(f'prediction\ttarget\tloss\tdist\n')
-            for src, trg in tqdm(sampler(), total=nb_instance):
-                pred, _ = decode_fn(self.model, src)
-                dist = util.edit_distance(pred, trg.view(-1).tolist()[1:-1])
-
-                src_mask = dummy_mask(src)
-                trg_mask = dummy_mask(trg)
-                data = (src, src_mask, trg, trg_mask)
-                loss = self.model.get_loss(data).item()
-
-                trg = self.data.decode_target(trg)[1:-1]
-                pred = self.data.decode_target(pred)
+            for pred, trg, loss, dist, _, _ in outputs:
                 fp.write(
                     f'{" ".join(pred)}\t{" ".join(trg)}\t{loss}\t{dist}\n')
                 cnt += 1
+
+        with open(f'{write_fp}.{mode}_gh.tsv', 'w', encoding='utf-8') as fp:
+            fp.write(f'target\tprediction\n')
+            for pred, trg, _, _, _, _ in outputs:
+                fp.write(
+                    f'{" ".join(trg)}\t{" ".join(pred)}\n')
+                cnt += 1
+
+        with open(f'{write_fp}.{mode}_copy-probs.tsv', 'w', encoding='utf-8') as fp:
+            fp.write(f'source\ttarget\tprediction\tdist\n')
+            for pred, trg, _, _, src, gen_prob in outputs:
+                fp.write(
+                    f'{" ".join(src)}\t{" ".join(trg)}\t{" ".join(pred)}\n')
+                fp.write(f'gen_prob')
+                fp.write(f'{gen_prob}\n')
+                cnt += 1
+
         decode_fn.reset()
         self.logger.info(f'finished decoding {cnt} {mode} instance')
 

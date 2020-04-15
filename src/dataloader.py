@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from align import Aligner
+# from src.align import Aligner
 
 BOS = '<s>'
 EOS = '<\s>'

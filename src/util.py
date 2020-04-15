@@ -162,7 +162,7 @@ class BasicEvaluator(Evaluator):
         '''
         correct, distance, nb_sample = 0, 0, 0
         for src, trg in tqdm(data_iter(), total=nb_data):
-            pred, _ = decode_fn(model, src)
+            pred, _, _ = decode_fn(model, src)
             nb_sample += 1
             trg = trg.view(-1).tolist()
             trg = [x for x in trg if x != BOS_IDX and x != EOS_IDX]
@@ -309,3 +309,9 @@ def edit_distance(str1, str2):
             table[i][j] = min(table[i - 1][j] + 1, table[i][j - 1] + 1,
                               table[i - 1][j - 1] + dg)
     return int(table[len(str2)][len(str1)])
+
+
+def get_source_to_target_mapping(src_vocab, trg_vocab):
+    # src_vocab, tgt_vocab = GRAPH_TEXT.vocab, PHON_TEXT.vocab
+
+    return {i: trg_vocab[s] for i, s in enumerate(src_vocab)}

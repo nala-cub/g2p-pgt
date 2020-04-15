@@ -359,13 +359,19 @@ class BaseTrainer(object):
         self.logger.info(
             f'maximum training {params.max_steps} steps ({max_epochs} epochs)')
         if params.total_eval > 0:
-            eval_every = max(max_epochs // params.total_eval, 1)
+            if max_epochs > 300:
+                eval_every = max((max_epochs - (max_epochs - 300)) // params.total_eval, 1)
+            else:
+                eval_every = max(max_epochs // params.total_eval, 1)
         else:
             eval_every = 1
+        # eval_every = 0
         self.logger.info(f'evaluate every {eval_every} epochs')
         for epoch_idx in range(start_epoch, max_epochs):
             self.train(epoch_idx, params.bs, params.max_norm)
-            if not (epoch_idx and (epoch_idx % eval_every == 0
+            if epoch_idx > 300:
+                eval_every = 10
+            if not (epoch_idx and eval_every != 0 and (epoch_idx % eval_every == 0
                                    or epoch_idx + 1 == max_epochs)):
                 continue
             with torch.no_grad():
