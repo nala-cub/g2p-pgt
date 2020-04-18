@@ -161,7 +161,19 @@ class BasicEvaluator(Evaluator):
         evaluate all instances
         '''
         correct, distance, nb_sample = 0, 0, 0
-        for src, trg in tqdm(data_iter(), total=nb_data):
+
+        if True or nb_data == 1:
+        # if nb_data == 1:
+                data_gen = data_iter()
+        else:
+            data_gen = data_iter(nb_data)
+
+        for data in tqdm(data_gen, total=nb_data):
+            if True or nb_data == 1:
+            # if nb_data == 1:
+                src, trg = data
+            else:
+                src, _, trg, _ = data
             pred, _, _ = decode_fn(model, src)
             nb_sample += 1
             trg = trg.view(-1).tolist()
@@ -191,7 +203,7 @@ class G2PEvaluator(BasicEvaluator):
     def evaluate_all(self, data_iter, nb_data, model, decode_fn):
         src_dict = defaultdict(list)
         for src, trg in tqdm(data_iter(), total=nb_data):
-            pred, _ = decode_fn(model, src)
+            pred, gen_prob_vals, _ = decode_fn(model, src)
             trg = trg.view(-1).tolist()
             trg = [x for x in trg if x != BOS_IDX and x != EOS_IDX]
             corr, dist = self.evaluate(pred, trg)
@@ -243,7 +255,7 @@ class TranslitEvaluator(BasicEvaluator):
         evaluate all instances
         '''
         def helper(src, trgs):
-            pred, _ = decode_fn(model, src)
+            pred, gen_prob_vals, _ = decode_fn(model, src)
             best_corr, best_dist, closest_ref = 0, float('inf'), None
             for trg in trgs:
                 trg = trg[1:-1].view(-1)
@@ -313,5 +325,5 @@ def edit_distance(str1, str2):
 
 def get_source_to_target_mapping(src_vocab, trg_vocab):
     # src_vocab, tgt_vocab = GRAPH_TEXT.vocab, PHON_TEXT.vocab
-
-    return {i: trg_vocab[s] for i, s in enumerate(src_vocab)}
+    # print([ch for ch in src_vocab.keys() if ch not in trg_vocab.keys()])
+    return {i: trg_vocab.get(s, trg_vocab.get('<UNK>')) for i, s in enumerate(src_vocab)}

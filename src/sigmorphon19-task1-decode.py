@@ -84,7 +84,7 @@ def main():
     with open(opt.out_file, 'w', encoding='utf-8') as fp:
         for lemma, tags in read_file(opt.in_file, opt.lang):
             src = encode(model, lemma, tags, device)
-            pred, _ = decode_fn(model, src)
+            pred, gen_prob_vals, _ = decode_fn(model, src)
             pred_out = ''.join(decode_trg(pred))
             fp.write(f'{"".join(lemma)}\t{pred_out}\t{";".join(tags[1:])}\n')
 

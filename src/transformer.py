@@ -409,10 +409,13 @@ class Transformer(nn.Module):
 
         gen_prob = gen_prob.unsqueeze(1)
 
-        weighted_output = (gen_prob*output.transpose(0, 1).transpose(1, 2) + (1-gen_prob)*copy.transpose(1, 2)).transpose(1, 2)
+        output_sf = F.softmax(output.transpose(0, 1), dim=-1)
 
-        return F.log_softmax(weighted_output.transpose(0, 1), dim=-1), \
-               [gen_prob, (1-gen_prob)*copy.transpose(1, 2).transpose(1,2).transpose(0, 1)]
+        weighted_output = (gen_prob*output_sf.transpose(1, 2) + (1-gen_prob)*copy.transpose(1, 2)).transpose(1, 2)
+
+        return torch.log(weighted_output.transpose(0, 1)), \
+               [gen_prob, ((1-gen_prob)*copy.transpose(1, 2)).transpose(1, 2).transpose(0, 1),
+                (gen_prob*output.transpose(0, 1).transpose(1, 2)).transpose(1, 2)]
 
     def forward(self, src_batch, src_mask, trg_batch, trg_mask):
         '''

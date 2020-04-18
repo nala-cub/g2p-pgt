@@ -246,9 +246,13 @@ class Trainer(BaseTrainer):
             else:
                 self.evaluator = util.BasicEvaluator()
 
-    def evaluate(self, mode, epoch_idx, decode_fn):
+    def evaluate(self, mode, epoch_idx, decode_fn, batch_size):
         self.model.eval()
-        sampler, nb_instance = self.iterate_instance(mode)
+        if True or batch_size == 1:
+        # if batch_size == 1:
+                sampler, nb_instance = self.iterate_instance(mode)  #this
+        else:
+            sampler, nb_instance = self.iterate_batch(mode, batch_size)  # this
         decode_fn.reset()
 
         results = self.evaluator.evaluate_all(sampler, nb_instance, self.model,
@@ -268,7 +272,12 @@ class Trainer(BaseTrainer):
 
         outputs = []
         for src, trg in tqdm(sampler(), total=nb_instance):
-            pred, gen_prob, _ = decode_fn(self.model, src)
+            pred, gen_prob_vals, _ = decode_fn(self.model, src)
+            if gen_prob_vals:
+                p_gen, copy_prob, gen_prob = gen_prob_vals
+            else:
+                p_gen, copy_prob, gen_prob = None, None, None
+            # p_gen = gen_prob_vals
             dist = util.edit_distance(pred, trg.view(-1).tolist()[1:-1])
 
             src_mask = dummy_mask(src)
@@ -278,29 +287,34 @@ class Trainer(BaseTrainer):
             src = self.data.decode_source(src)
             trg = self.data.decode_target(trg)[1:-1]
             pred = self.data.decode_target(pred)
-            outputs.append([pred, trg, loss, dist, src, gen_prob])
+            outputs.append([pred, trg, loss, dist, src, p_gen, copy_prob, gen_prob])
 
         with open(f'{write_fp}.{mode}.tsv', 'w', encoding='utf-8') as fp:
             fp.write(f'prediction\ttarget\tloss\tdist\n')
-            for pred, trg, loss, dist, _, _ in outputs:
+            for pred, trg, loss, dist, _, _, _, _ in outputs:
                 fp.write(
                     f'{" ".join(pred)}\t{" ".join(trg)}\t{loss}\t{dist}\n')
                 cnt += 1
 
         with open(f'{write_fp}.{mode}_gh.tsv', 'w', encoding='utf-8') as fp:
             fp.write(f'target\tprediction\n')
-            for pred, trg, _, _, _, _ in outputs:
+            for pred, trg, _, _, _, _, _, _ in outputs:
                 fp.write(
                     f'{" ".join(trg)}\t{" ".join(pred)}\n')
                 cnt += 1
 
         with open(f'{write_fp}.{mode}_copy-probs.tsv', 'w', encoding='utf-8') as fp:
             fp.write(f'source\ttarget\tprediction\tdist\n')
-            for pred, trg, _, _, src, gen_prob in outputs:
+            for pred, trg, _, _, src, p_gen, copy_prob, gen_prob in outputs:
                 fp.write(
                     f'{" ".join(src)}\t{" ".join(trg)}\t{" ".join(pred)}\n')
+                fp.write(f'p_gen')
+                fp.write(f'{p_gen}\n')
+                fp.write(f'copy_prob')
+                fp.write(f'{copy_prob}\n')
                 fp.write(f'gen_prob')
                 fp.write(f'{gen_prob}\n')
+
                 cnt += 1
 
         decode_fn.reset()
