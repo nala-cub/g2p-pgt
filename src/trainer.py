@@ -15,6 +15,8 @@ from tqdm import tqdm
 
 import util
 
+from src.util import WarmupInverseSquareRootSchedule
+
 tqdm.monitor_interval = 0
 
 tqdm = partial(tqdm, bar_format='{l_bar}{r_bar}')
@@ -76,7 +78,9 @@ class BaseTrainer(object):
         self.evaluator = None
         self.global_steps = 0
         self.last_devloss = float('inf')
+        self.best_devloss= self.last_devloss
         self.models: List[Evaluation] = list()
+        self.epochs_without_improvement = 0
 
     def set_args(self):
         '''
@@ -95,6 +99,8 @@ class BaseTrainer(object):
         parser.add_argument('--max_steps', default=0, type=int, help='maximum training steps')
         parser.add_argument('--warmup_steps', default=4000, type=int, help='number of warm up steps')
         parser.add_argument('--total_eval', default=-1, type=int, help='total number of evaluation')
+        parser.add_argument('--freq_eval_after', default=0, type=int, help='epoch after freq evals start')
+        parser.add_argument('--freq_eval_every', default=0, type=int, help='eval every epoch after freq eval epoch')
         parser.add_argument('--optimizer', default=Optimizer.adam, type=Optimizer, choices=list(Optimizer))
         parser.add_argument('--scheduler', default=Scheduler.reducewhenstuck, type=Scheduler, choices=list(Scheduler))
         parser.add_argument('--lr', default=1e-3, type=float, help='learning rate')
@@ -278,7 +284,7 @@ class BaseTrainer(object):
         else:
             raise ValueError(f'wrong mode: {mode}')
 
-    def evaluate(self, mode, epoch_idx, decode_fn) -> List[util.Eval]:
+    def evaluate(self, mode, epoch_idx, decode_fn, batch_size) -> List[util.Eval]:
         raise NotImplementedError
 
     def decode(self, mode, write_fp, decode_fn):
@@ -287,11 +293,13 @@ class BaseTrainer(object):
     def update_lr_and_stop_early(self, epoch_idx, devloss, estop):
         stop_early = True
 
+        print("in update_lr, {}".format(type(self.scheduler)))
         if isinstance(self.scheduler, ReduceLROnPlateau):
             prev_lr = self.get_lr()
             self.scheduler.step(devloss)
             curr_lr = self.get_lr()
 
+            print("diff: {} < estop: {}, ({}, {})".format(self.last_devloss - devloss, estop, self.last_devloss, devloss))
             if (self.last_devloss - devloss) < estop and \
                 prev_lr == curr_lr == self.min_lr:
                 self.logger.info(
@@ -299,6 +307,24 @@ class BaseTrainer(object):
                     epoch_idx, self.last_devloss, devloss)
                 stop_status = stop_early
             else:
+                stop_status = not stop_early
+            self.last_devloss = devloss
+        elif isinstance(self.scheduler, util.WarmupInverseSquareRootSchedule):
+            print("diff: {} < estop: {}, epochs_wo_i: {}({}, {}, {})".format(self.last_devloss - devloss, estop,
+                                                                         self.epochs_without_improvement,
+                                                                         self.best_devloss, self.last_devloss, devloss))
+            if (self.best_devloss - devloss) < estop:
+                self.epochs_without_improvement += 1
+                if self.epochs_without_improvement >= self.params.patience:
+                    self.logger.info(
+                        'Early stopping triggered with epoch %d (previous dev loss: %f, current: %f)',
+                        epoch_idx, self.last_devloss, devloss)
+                    stop_status = stop_early
+                else:
+                    stop_status = not stop_early
+            else:
+                self.epochs_without_improvement = 0
+                self.best_devloss = self.last_devloss
                 stop_status = not stop_early
             self.last_devloss = devloss
         else:
@@ -321,7 +347,7 @@ class BaseTrainer(object):
         self.calc_loss(DEV, bs, -1)
         self.logger.info('decoding dev set')
         self.decode(DEV, f'{model_fp}.decode', decode_fn)
-        results = self.evaluate(DEV, -1, decode_fn)
+        results = self.evaluate(DEV, -1, decode_fn, self.params.bs)
         if results:
             results = ' '.join([f'{r.desc} {r.res}' for r in results])
             self.logger.info(f'DEV {model_fp.split("/")[-1]} {results}')
@@ -341,7 +367,7 @@ class BaseTrainer(object):
                 if model.filepath in save_fps:
                     continue
                 os.remove(model.filepath)
-        os.remove(f'{model_fp}.progress')
+        # os.remove(f'{model_fp}.progress')
 
     def run(self, start_epoch, decode_fn=None):
         '''
@@ -359,24 +385,23 @@ class BaseTrainer(object):
         self.logger.info(
             f'maximum training {params.max_steps} steps ({max_epochs} epochs)')
         if params.total_eval > 0:
-            if max_epochs > 300:
-                eval_every = max((max_epochs - (max_epochs - 300)) // params.total_eval, 1)
+            if params.freq_eval_after and max_epochs > params.freq_eval_after:
+                eval_every = max((max_epochs - (max_epochs - params.freq_eval_after)) // params.total_eval, 1)
             else:
                 eval_every = max(max_epochs // params.total_eval, 1)
         else:
             eval_every = 1
-        # eval_every = 0
         self.logger.info(f'evaluate every {eval_every} epochs')
         for epoch_idx in range(start_epoch, max_epochs):
             self.train(epoch_idx, params.bs, params.max_norm)
-            if epoch_idx > 300:
-                eval_every = 10
+            if params.freq_eval_after and params.freq_eval_every and epoch_idx > params.freq_eval_after:
+                eval_every = params.freq_eval_every
             if not (epoch_idx and eval_every != 0 and (epoch_idx % eval_every == 0
                                    or epoch_idx + 1 == max_epochs)):
                 continue
             with torch.no_grad():
                 devloss = self.calc_loss(DEV, params.bs, epoch_idx)
-                eval_res = self.evaluate(DEV, epoch_idx, decode_fn)
+                eval_res = self.evaluate(DEV, epoch_idx, decode_fn, params.bs)
             if self.update_lr_and_stop_early(epoch_idx, devloss, params.estop):
                 finish = True
                 break

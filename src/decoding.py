@@ -309,6 +309,7 @@ def decode_greedy_transformer(transducer,
                                      device=DEVICE).view(len(output), 1)
         trg_mask = dummy_mask(output_tensor)
         trg_mask = (trg_mask == 0).transpose(0, 1)
+        # src_mask_i = src_mask[:len(output)]
 
         dec_hs, attn_weights, embed_tgt = transducer.decode(enc_hs, src_mask, output_tensor, trg_mask)
 

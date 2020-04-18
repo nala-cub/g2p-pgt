@@ -84,7 +84,7 @@ def main():
             word, tags = toks[1], toks[5]
             word, tags = list(word), tags.split(';')
             src = encode(model, word, tags, device)
-            pred, _ = decode_fn(model, src)
+            pred, gen_prob_vals, _ = decode_fn(model, src)
             pred_out = ''.join(decode_trg(pred))
             # write lemma
             toks[2] = pred_out
