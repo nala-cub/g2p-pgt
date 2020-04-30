@@ -1,6 +1,7 @@
 import argparse
 import glob
 import os
+import pickle
 import random
 import re
 from dataclasses import dataclass
@@ -13,8 +14,9 @@ import torch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 
-import util
+import time
 
+from src import util
 from src.util import WarmupInverseSquareRootSchedule
 
 tqdm.monitor_interval = 0
@@ -61,7 +63,10 @@ class BaseTrainer(object):
         self.set_args()
         self.params = self.get_params()
 
+        self.sample_param_attrs()
+
         util.maybe_mkdir(self.params.model)
+        util.maybe_mkdir(self.params.opt_pickles)
         self.logger = util.get_logger(self.params.model + '.log',
                                       log_level=self.params.loglevel)
         for key, value in vars(self.params).items():
@@ -94,7 +99,7 @@ class BaseTrainer(object):
         parser.add_argument('--test', default=None, type=str, nargs='+')
         parser.add_argument('--model', required=True, help='dump model filename')
         parser.add_argument('--load', default='', help='load model and continue training; with `smart`, recover training automatically')
-        parser.add_argument('--bs', default=20, type=int, help='training batch size')
+        parser.add_argument('--bs', default=20, type=int, help='training batch size', nargs='+')
         parser.add_argument('--epochs', default=20, type=int, help='maximum training epochs')
         parser.add_argument('--max_steps', default=0, type=int, help='maximum training steps')
         parser.add_argument('--warmup_steps', default=4000, type=int, help='number of warm up steps')
@@ -103,7 +108,7 @@ class BaseTrainer(object):
         parser.add_argument('--freq_eval_every', default=0, type=int, help='eval every epoch after freq eval epoch')
         parser.add_argument('--optimizer', default=Optimizer.adam, type=Optimizer, choices=list(Optimizer))
         parser.add_argument('--scheduler', default=Scheduler.reducewhenstuck, type=Scheduler, choices=list(Scheduler))
-        parser.add_argument('--lr', default=1e-3, type=float, help='learning rate')
+        parser.add_argument('--lr', default=1e-3, type=float, help='learning rate', nargs='+')
         parser.add_argument('--min_lr', default=1e-5, type=float, help='minimum learning rate')
         parser.add_argument('--momentum', default=0.9, type=float, help='momentum of SGD')
         parser.add_argument('--beta1', default=0.9, type=float, help='beta1 of Adam')
@@ -118,10 +123,24 @@ class BaseTrainer(object):
         parser.add_argument('--saveall', default=False, action='store_true', help='keep all models')
         parser.add_argument('--shuffle', default=False, action='store_true', help='shuffle the data')
         parser.add_argument('--cleanup_anyway', default=False, action='store_true', help='cleanup anyway')
+        parser.add_argument('--opt_pickles', required=True, help='file path for hyperparameter dicts stored with '
+                                                                 'results used for tuning')
         # yapf: enable
 
     def get_params(self):
         return self.parser.parse_args()
+
+    def sample_param_attrs(self):
+        self.params.bs = random.choice(self.params.bs)
+        self.params.lr = round(np.random.uniform(*self.params.lr), 4) if self.params.sample and len(self.params.lr) > 1 \
+            else self.params.lr[0]
+        self.params.src_layer = random.choice(self.params.src_layer)
+        self.params.trg_layer = random.choice(self.params.trg_layer)
+        self.params.nb_heads = random.choice(self.params.nb_heads)
+        self.params.dropout = round(np.random.uniform(*self.params.dropout), 2) if self.params.sample and len(self.params.dropout) > 1 \
+            else self.params.dropout[0]
+
+
 
     def checklist_before_run(self):
         assert self.data is not None, 'call load_data before run'
@@ -309,12 +328,13 @@ class BaseTrainer(object):
             else:
                 stop_status = not stop_early
             self.last_devloss = devloss
-        elif isinstance(self.scheduler, util.WarmupInverseSquareRootSchedule):
-            print("diff: {} < estop: {}, epochs_wo_i: {}({}, {}, {})".format(self.last_devloss - devloss, estop,
-                                                                         self.epochs_without_improvement,
-                                                                         self.best_devloss, self.last_devloss, devloss))
+        elif not self.params.no_estop and isinstance(self.scheduler, util.WarmupInverseSquareRootSchedule):
             if (self.best_devloss - devloss) < estop:
                 self.epochs_without_improvement += 1
+                print("diff: {} < estop: {}, epochs_wo_i: {}({}, {}, {})".format(self.last_devloss - devloss, estop,
+                                                                                 self.epochs_without_improvement,
+                                                                                 self.best_devloss, self.last_devloss,
+                                                                                 devloss))
                 if self.epochs_without_improvement >= self.params.patience:
                     self.logger.info(
                         'Early stopping triggered with epoch %d (previous dev loss: %f, current: %f)',
@@ -340,26 +360,32 @@ class BaseTrainer(object):
     def select_model(self):
         raise NotImplementedError
 
-    def reload_and_test(self, model_fp, best_fp, bs, decode_fn):
+    def reload_and_test(self, model_fp, best_fp, bs, decode_fn, pickles_fp):
         self.model = None
         self.logger.info(f'loading {best_fp} for testing')
         self.load_model(best_fp)
         self.calc_loss(DEV, bs, -1)
         self.logger.info('decoding dev set')
         self.decode(DEV, f'{model_fp}.decode', decode_fn)
-        results = self.evaluate(DEV, -1, decode_fn, self.params.bs)
-        if results:
-            results = ' '.join([f'{r.desc} {r.res}' for r in results])
+        raw_dev_results = self.evaluate(DEV, -1, decode_fn, self.params.bs)
+        if raw_dev_results:
+            results = ' '.join([f'{r.desc} {r.res}' for r in raw_dev_results])
             self.logger.info(f'DEV {model_fp.split("/")[-1]} {results}')
 
         if self.data.test_file is not None:
             self.calc_loss(TEST, bs, -1)
             self.logger.info('decoding test set')
             self.decode(TEST, f'{model_fp}.decode', decode_fn)
-            results = self.evaluate(TEST, -1, decode_fn)
-            if results:
-                results = ' '.join([f'{r.desc} {r.res}' for r in results])
+            raw_test_results = self.evaluate(TEST, -1, decode_fn, self.params.bs)
+            if raw_test_results:
+                results = ' '.join([f'{r.desc} {r.res}' for r in raw_test_results])
                 self.logger.info(f'TEST {model_fp.split("/")[-1]} {results}')
+
+        with open(f'{pickles_fp}.decode.{DEV}.pkl', 'wb') as fp:
+            pickle.dump({'bs': self.params.bs, 'lr': self.params.lr, 'src_layer': self.params.src_layer,
+                         'trg_layer': self.params.trg_layer, 'nb_heads': self.params.nb_heads,
+                         'dropout': self.params.dropout, **{r.desc: r.res for r in raw_dev_results}}, fp,
+                        protocol=pickle.HIGHEST_PROTOCOL)
 
     def cleanup(self, saveall, save_fps, model_fp):
         if not saveall:
@@ -393,6 +419,7 @@ class BaseTrainer(object):
             eval_every = 1
         self.logger.info(f'evaluate every {eval_every} epochs')
         for epoch_idx in range(start_epoch, max_epochs):
+            # print("train:")
             self.train(epoch_idx, params.bs, params.max_norm)
             if params.freq_eval_after and params.freq_eval_every and epoch_idx > params.freq_eval_after:
                 eval_every = params.freq_eval_every
@@ -400,6 +427,7 @@ class BaseTrainer(object):
                                    or epoch_idx + 1 == max_epochs)):
                 continue
             with torch.no_grad():
+                # print("eval:")
                 devloss = self.calc_loss(DEV, params.bs, epoch_idx)
                 eval_res = self.evaluate(DEV, epoch_idx, decode_fn, params.bs)
             if self.update_lr_and_stop_early(epoch_idx, devloss, params.estop):
@@ -411,5 +439,5 @@ class BaseTrainer(object):
             best_fp, save_fps = self.select_model()
             with torch.no_grad():
                 self.reload_and_test(params.model, best_fp, params.bs,
-                                     decode_fn)
+                                     decode_fn, params.opt_pickles)
             self.cleanup(params.saveall, save_fps, params.model)

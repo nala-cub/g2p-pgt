@@ -3,9 +3,13 @@ train
 '''
 import math
 import os
+import pickle
+import random
 from functools import partial
 
+import time
 import torch
+from pandas import np
 from tqdm import tqdm
 
 from src import util, model, transformer, dataloader
@@ -62,11 +66,11 @@ class Trainer(BaseTrainer):
         parser.add_argument('--max_seq_len', default=128, type=int)
         parser.add_argument('--max_decode_len', default=128, type=int)
         parser.add_argument('--init', default='', help='control initialization')
-        parser.add_argument('--dropout', default=0.2, type=float, help='dropout prob')
+        parser.add_argument('--dropout', default=0.2, type=float, help='dropout prob', nargs='+')
         parser.add_argument('--embed_dim', default=100, type=int, help='embedding dimension')
-        parser.add_argument('--nb_heads', default=4, type=int, help='number of attention head')
-        parser.add_argument('--src_layer', default=1, type=int, help='source encoder number of layers')
-        parser.add_argument('--trg_layer', default=1, type=int, help='target decoder number of layers')
+        parser.add_argument('--nb_heads', default=4, type=int, help='number of attention head', nargs='+')
+        parser.add_argument('--src_layer', default=1, type=int, help='source encoder number of layers', nargs='+')
+        parser.add_argument('--trg_layer', default=1, type=int, help='target decoder number of layers', nargs='+')
         parser.add_argument('--src_hs', default=200, type=int, help='source encoder hidden dimension')
         parser.add_argument('--trg_hs', default=200, type=int, help='target decoder hidden dimension')
         parser.add_argument('--label_smooth', default=0., type=float, help='label smoothing coeff')
@@ -79,6 +83,11 @@ class Trainer(BaseTrainer):
         parser.add_argument('--mono', default=False, action='store_true', help='enforce monotonicity')
         parser.add_argument('--bestacc', default=False, action='store_true', help='select model by accuracy only')
         parser.add_argument('--use_copy', help="bool flag to use copy mechanism")
+        parser.add_argument('--align', default=None, type=str, help='path to alignment map')
+        parser.add_argument('--no_estop', default=False, action='store_true', help='no early stopping')
+        parser.add_argument('--no_scale', default=False, action='store_true', help='no embed scaling')
+        parser.add_argument('--sample', default=False, action='store_true',
+                            help='tie decoder input & output embeddings')
         # yapf: enable
 
     def load_data(self, dataset, train, dev, test):
@@ -149,13 +158,19 @@ class Trainer(BaseTrainer):
         kwargs['src_vocab_size'] = self.data.source_vocab_size
         kwargs['trg_vocab_size'] = self.data.target_vocab_size
         kwargs['embed_dim'] = params.embed_dim
+
         kwargs['nb_heads'] = params.nb_heads
+
         kwargs['dropout_p'] = params.dropout
+
         kwargs['tie_trg_embed'] = params.tie_trg_embed
         kwargs['src_hid_size'] = params.src_hs
         kwargs['trg_hid_size'] = params.trg_hs
+
         kwargs['src_nb_layers'] = params.src_layer
+
         kwargs['trg_nb_layers'] = params.trg_layer
+
         kwargs['nb_attr'] = self.data.nb_attr
         kwargs['nb_sample'] = params.nb_sample
         kwargs['wid_siz'] = params.wid_siz
@@ -164,6 +179,10 @@ class Trainer(BaseTrainer):
         kwargs['trg_c2i'] = self.data.target_c2i
         kwargs['attr_c2i'] = self.data.attr_c2i
         kwargs['use_copy'] = params.use_copy
+        kwargs['align'] = params.align
+        kwargs['no_estop'] = params.no_estop
+        kwargs['no_scale'] = params.no_scale
+
         model_class = None
         indtag, mono = True, True
         # yapf: disable
@@ -213,12 +232,12 @@ class Trainer(BaseTrainer):
     def dump_state_dict(self, filepath):
         util.maybe_mkdir(filepath)
         self.model = self.model.to('cpu')
-        torch.save(self.model.state_dict(), filepath)
+        t.save(self.model.state_dict(), filepath)
         self.model = self.model.to(self.device)
         self.logger.info(f'dump to {filepath}')
 
     def load_state_dict(self, filepath):
-        state_dict = torch.load(filepath)
+        state_dict = t.load(filepath)
         self.model.load_state_dict(state_dict)
         self.model = self.model.to(self.device)
         self.logger.info(f'load from {filepath}')
@@ -332,8 +351,9 @@ class Trainer(BaseTrainer):
                type(self.evaluator) == util.P2GEvaluator or \
                type(self.evaluator) == util.HistnormEvaluator:
                 # [acc, edit distance / per ]
-                if model.evaluation_result[0].res >= best_res.evaluation_result[0].res and \
-                   model.evaluation_result[1].res <= best_res.evaluation_result[1].res:
+                # if model.evaluation_result[0].res >= best_res.evaluation_result[0].res and \
+                #    model.evaluation_result[1].res <= best_res.evaluation_result[1].res:
+                if model.evaluation_result[0].res >= best_res.evaluation_result[0].res:
                     best_res = model
             elif type(self.evaluator) == util.TranslitEvaluator:
                 if model.evaluation_result[0].res >= best_res.evaluation_result[0].res and \

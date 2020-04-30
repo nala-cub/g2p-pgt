@@ -295,12 +295,14 @@ def decode_greedy_transformer(transducer,
     '''
     src_sentence: [seq_len]
     '''
+    # print("in decoder:")
     assert isinstance(transducer, Transformer)
     transducer.eval()
     src_mask = dummy_mask(src_sentence)
     src_mask = (src_mask == 0).transpose(0, 1)
     enc_hs = transducer.encode(src_sentence, src_mask)
-
+    # print("enc_hs.shape: {}".format(enc_hs.shape))
+    # print("src_mask.shape: {}".format(src_mask.shape))
     output, attns = [trg_bos], []
 
     gen_prob = None
@@ -309,9 +311,14 @@ def decode_greedy_transformer(transducer,
                                      device=DEVICE).view(len(output), 1)
         trg_mask = dummy_mask(output_tensor)
         trg_mask = (trg_mask == 0).transpose(0, 1)
-        # src_mask_i = src_mask[:len(output)]
 
-        dec_hs, attn_weights, embed_tgt = transducer.decode(enc_hs, src_mask, output_tensor, trg_mask)
+        # print("decode::")
+        # dec_hs, attn_weights, embed_tgt = transducer.decode(enc_hs, src_mask, output_tensor, trg_mask)
+
+        src_mask_i = src_mask[:len(output)]
+        enc_hs_i = enc_hs[:, :len(output)]
+        src_sentence_i = src_sentence[:, :len(output)]
+        dec_hs, attn_weights, embed_tgt = transducer.decode(enc_hs_i, src_mask_i, output_tensor, trg_mask)
 
         t_output = transducer.final_out(dec_hs)
 
@@ -319,7 +326,10 @@ def decode_greedy_transformer(transducer,
             word_logprob = F.log_softmax(t_output, dim=-1)
         else:
             # print("using copy")
-            word_logprob, gen_prob = transducer.source_weighted_output(src_sentence, t_output, attn_weights, enc_hs, dec_hs, embed_tgt)
+            # word_logprob, gen_prob = transducer.source_weighted_output(src_sentence, t_output, attn_weights, enc_hs,
+            # dec_hs, embed_tgt)
+            word_logprob, gen_prob = transducer.source_weighted_output(src_sentence_i, t_output, attn_weights, enc_hs_i,
+                                                                       dec_hs, embed_tgt)
 
         # word_logprob = F.log_softmax(word_logprob, dim=-1)
 

@@ -10,7 +10,7 @@ from torch.distributions import Distribution
 from torch.nn.modules.transformer import _get_clones
 
 from src.dataloader import BOS_IDX, EOS_IDX, PAD_IDX, STEP_IDX, UNK_IDX
-from src.util import get_source_to_target_mapping
+from src.util import get_source_to_target_mapping, get_aligned_source_to_target_mapping
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -264,6 +264,7 @@ class TransformerDecoderLayer(nn.Module):
         residual = tgt
         if self.normalize_before:
             tgt = self.norm1(tgt)
+        # print("self attn: tgt: {} tgt: {} tgt_kpm: {}".format(tgt.shape, tgt.shape, tgt_key_padding_mask.shape))
         tgt = self.self_attn(tgt,
                              tgt,
                              tgt,
@@ -276,6 +277,7 @@ class TransformerDecoderLayer(nn.Module):
         residual = tgt
         if self.normalize_before:
             tgt = self.norm2(tgt)
+        # print("mh attn: tgt: {} mem: {} mem_kpm: {}".format(tgt.shape, memory.shape, memory_key_padding_mask.shape))
         tgt, attn_weights = self.multihead_attn(tgt,
                                   memory,
                                   memory,
@@ -301,7 +303,7 @@ class Transformer(nn.Module):
     def __init__(self, *, src_vocab_size, trg_vocab_size, embed_dim, nb_heads,
                  src_hid_size, src_nb_layers, trg_hid_size, trg_nb_layers,
                  dropout_p, tie_trg_embed, src_c2i, trg_c2i, attr_c2i,
-                 label_smooth, use_copy, **kwargs):
+                 label_smooth, use_copy, align, no_scale, **kwargs):
         '''
         init
         '''
@@ -320,6 +322,8 @@ class Transformer(nn.Module):
         self.label_smooth = label_smooth
         self.src_c2i, self.trg_c2i, self.attr_c2i = src_c2i, trg_c2i, attr_c2i
         self.use_copy = use_copy
+        self.no_scale = no_scale
+
         self.src_embed = Embedding(src_vocab_size,
                                    embed_dim,
                                    padding_idx=PAD_IDX)
@@ -354,10 +358,16 @@ class Transformer(nn.Module):
 
         self.generate_prob = nn.Linear(embed_dim * 3, 1)
 
+        if align:
+            self.src_tgt_map = get_aligned_source_to_target_mapping(self.src_c2i, self.trg_c2i, align)
+
         # self._reset_parameters()
 
     def embed(self, src_batch, src_mask):
-        word_embed = self.embed_scale * self.src_embed(src_batch)
+        if self.no_scale:
+            word_embed = self.src_embed(src_batch)
+        else:
+            word_embed = self.embed_scale * self.src_embed(src_batch)
         pos_embed = self.position_embed(src_batch)
         embed = self.dropout(word_embed + pos_embed)
         return embed
@@ -365,9 +375,16 @@ class Transformer(nn.Module):
     def get_copy(self, src, attn_weights, output_shape, src_tgt_map):
         copy = torch.zeros(output_shape)
 
+        if torch.cuda.is_available():
+            copy = copy.cuda()
+
         src_tile = src.transpose(0, 1).unsqueeze(1).repeat(1, copy.size(1), 1)
 
-        mapped_tile = torch.tensor(np.vectorize(lambda x: src_tgt_map.get(x, UNK_IDX))(np.array(src_tile))).long()
+        mapped_tile = torch.tensor(np.vectorize(lambda x: src_tgt_map.get(x, UNK_IDX))(np.array(src_tile.cpu()))).long()
+
+        if torch.cuda.is_available():
+            mapped_tile = mapped_tile.cuda()
+            attn_weights = attn_weights.cuda()
 
         copy = copy.scatter_add(2, mapped_tile, attn_weights)
 
@@ -378,8 +395,12 @@ class Transformer(nn.Module):
         return self.encoder(embed, src_key_padding_mask=src_mask)
 
     def decode(self, enc_hs, src_mask, trg_batch, trg_mask):
-        # print("trg_batch.shape: {}".format(trg_batch.shape))
-        word_embed = self.embed_scale * self.trg_embed(trg_batch)
+        # print("enc_hs: {} src_mask: {} trg_batch: {} trg_mask: {}".format(enc_hs.shape, src_mask.shape,
+        #                                                                   trg_batch.shape, trg_mask.shape))
+        if self.no_scale:
+            word_embed = self.trg_embed(trg_batch)
+        else:
+            word_embed = self.embed_scale * self.trg_embed(trg_batch)
         pos_embed = self.position_embed(trg_batch)
         embed = self.dropout(word_embed + pos_embed)
 
@@ -391,15 +412,15 @@ class Transformer(nn.Module):
         return dec_hs, attn_weights, embed
 
     def source_weighted_output(self, src_batch, output, attn_weights, enc_hs, dec_hs, embed_tgt):
+        # print("attn_weights: {} enc_hs: {} ".format(attn_weights.shape, enc_hs.shape))
         context = torch.bmm(attn_weights, enc_hs.transpose(0, 1))
 
         gen_prob = torch.sigmoid(self.generate_prob(torch.cat([context,
                                                                dec_hs.transpose(0, 1),
                                                                embed_tgt.transpose(0, 1)], axis=2).squeeze()).squeeze())
 
-        src_tgt_map = get_source_to_target_mapping(self.src_c2i, self.trg_c2i)
 
-        copy = self.get_copy(src_batch, attn_weights, output.transpose(0, 1).shape, src_tgt_map)
+        copy = self.get_copy(src_batch, attn_weights, output.transpose(0, 1).shape, self.src_tgt_map)
 
         if gen_prob.dim() == 0:
             gen_prob = gen_prob.unsqueeze(0)
@@ -443,6 +464,7 @@ class Transformer(nn.Module):
         '''
         compute loss
         '''
+        print("pred: {} tgt: {}".format(predict.shape, target.shape))
         predict = predict.view(-1, self.trg_vocab_size)
         # nll_loss = F.nll_loss(predict, target.view(-1), ignore_index=PAD_IDX)
         target = target.view(-1, 1)

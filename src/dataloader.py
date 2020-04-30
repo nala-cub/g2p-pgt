@@ -16,6 +16,9 @@ PAD = '<PAD>'
 UNK = '<UNK>'
 ALIGN = '<a>'
 STEP = '<step>'
+EX = '!'
+QU = '?'
+
 PAD_IDX = 0
 BOS_IDX = 1
 EOS_IDX = 2
