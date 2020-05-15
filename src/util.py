@@ -339,8 +339,6 @@ def edit_distance(str1, str2):
 
 
 def get_source_to_target_mapping(src_vocab, trg_vocab):
-    print("without match:", [ch for ch in src_vocab.keys() if ch not in trg_vocab.keys()])
-
     src_tgt_map = {}
     for token in src_vocab:
         src_tgt_map[src_vocab[token]] = trg_vocab.get(token, trg_vocab.get(UNK))

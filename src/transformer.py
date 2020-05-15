@@ -264,7 +264,6 @@ class TransformerDecoderLayer(nn.Module):
         residual = tgt
         if self.normalize_before:
             tgt = self.norm1(tgt)
-        # print("self attn: tgt: {} tgt: {} tgt_kpm: {}".format(tgt.shape, tgt.shape, tgt_key_padding_mask.shape))
         tgt = self.self_attn(tgt,
                              tgt,
                              tgt,
@@ -277,7 +276,6 @@ class TransformerDecoderLayer(nn.Module):
         residual = tgt
         if self.normalize_before:
             tgt = self.norm2(tgt)
-        # print("mh attn: tgt: {} mem: {} mem_kpm: {}".format(tgt.shape, memory.shape, memory_key_padding_mask.shape))
         tgt, attn_weights = self.multihead_attn(tgt,
                                   memory,
                                   memory,
@@ -395,8 +393,6 @@ class Transformer(nn.Module):
         return self.encoder(embed, src_key_padding_mask=src_mask)
 
     def decode(self, enc_hs, src_mask, trg_batch, trg_mask):
-        # print("enc_hs: {} src_mask: {} trg_batch: {} trg_mask: {}".format(enc_hs.shape, src_mask.shape,
-        #                                                                   trg_batch.shape, trg_mask.shape))
         if self.no_scale:
             word_embed = self.trg_embed(trg_batch)
         else:
@@ -412,7 +408,6 @@ class Transformer(nn.Module):
         return dec_hs, attn_weights, embed
 
     def source_weighted_output(self, src_batch, output, attn_weights, enc_hs, dec_hs, embed_tgt):
-        # print("attn_weights: {} enc_hs: {} ".format(attn_weights.shape, enc_hs.shape))
         context = torch.bmm(attn_weights, enc_hs.transpose(0, 1))
 
         gen_prob = torch.sigmoid(self.generate_prob(torch.cat([context,
@@ -464,7 +459,6 @@ class Transformer(nn.Module):
         '''
         compute loss
         '''
-        print("pred: {} tgt: {}".format(predict.shape, target.shape))
         predict = predict.view(-1, self.trg_vocab_size)
         # nll_loss = F.nll_loss(predict, target.view(-1), ignore_index=PAD_IDX)
         target = target.view(-1, 1)

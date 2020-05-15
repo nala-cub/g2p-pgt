@@ -141,7 +141,6 @@ class BaseTrainer(object):
             else self.params.dropout[0]
 
 
-
     def checklist_before_run(self):
         assert self.data is not None, 'call load_data before run'
         assert self.model is not None, 'call build_model before run'
@@ -312,13 +311,11 @@ class BaseTrainer(object):
     def update_lr_and_stop_early(self, epoch_idx, devloss, estop):
         stop_early = True
 
-        print("in update_lr, {}".format(type(self.scheduler)))
         if isinstance(self.scheduler, ReduceLROnPlateau):
             prev_lr = self.get_lr()
             self.scheduler.step(devloss)
             curr_lr = self.get_lr()
 
-            print("diff: {} < estop: {}, ({}, {})".format(self.last_devloss - devloss, estop, self.last_devloss, devloss))
             if (self.last_devloss - devloss) < estop and \
                 prev_lr == curr_lr == self.min_lr:
                 self.logger.info(
@@ -331,10 +328,6 @@ class BaseTrainer(object):
         elif not self.params.no_estop and isinstance(self.scheduler, util.WarmupInverseSquareRootSchedule):
             if (self.best_devloss - devloss) < estop:
                 self.epochs_without_improvement += 1
-                print("diff: {} < estop: {}, epochs_wo_i: {}({}, {}, {})".format(self.last_devloss - devloss, estop,
-                                                                                 self.epochs_without_improvement,
-                                                                                 self.best_devloss, self.last_devloss,
-                                                                                 devloss))
                 if self.epochs_without_improvement >= self.params.patience:
                     self.logger.info(
                         'Early stopping triggered with epoch %d (previous dev loss: %f, current: %f)',
@@ -373,13 +366,13 @@ class BaseTrainer(object):
             self.logger.info(f'DEV {model_fp.split("/")[-1]} {results}')
 
         if self.data.test_file is not None:
-            self.calc_loss(TEST, bs, -1)
+            # self.calc_loss(TEST, bs, -1)
             self.logger.info('decoding test set')
             self.decode(TEST, f'{model_fp}.decode', decode_fn)
-            raw_test_results = self.evaluate(TEST, -1, decode_fn, self.params.bs)
-            if raw_test_results:
-                results = ' '.join([f'{r.desc} {r.res}' for r in raw_test_results])
-                self.logger.info(f'TEST {model_fp.split("/")[-1]} {results}')
+            # raw_test_results = self.evaluate(TEST, -1, decode_fn, self.params.bs)
+            # if raw_test_results:
+            #     results = ' '.join([f'{r.desc} {r.res}' for r in raw_test_results])
+            #     self.logger.info(f'TEST {model_fp.split("/")[-1]} {results}')
 
         with open(f'{pickles_fp}.decode.{DEV}.pkl', 'wb') as fp:
             pickle.dump({'bs': self.params.bs, 'lr': self.params.lr, 'src_layer': self.params.src_layer,
@@ -419,7 +412,6 @@ class BaseTrainer(object):
             eval_every = 1
         self.logger.info(f'evaluate every {eval_every} epochs')
         for epoch_idx in range(start_epoch, max_epochs):
-            # print("train:")
             self.train(epoch_idx, params.bs, params.max_norm)
             if params.freq_eval_after and params.freq_eval_every and epoch_idx > params.freq_eval_after:
                 eval_every = params.freq_eval_every
@@ -427,7 +419,6 @@ class BaseTrainer(object):
                                    or epoch_idx + 1 == max_epochs)):
                 continue
             with torch.no_grad():
-                # print("eval:")
                 devloss = self.calc_loss(DEV, params.bs, epoch_idx)
                 eval_res = self.evaluate(DEV, epoch_idx, decode_fn, params.bs)
             if self.update_lr_and_stop_early(epoch_idx, devloss, params.estop):

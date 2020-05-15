@@ -322,6 +322,12 @@ class Trainer(BaseTrainer):
                     f'{" ".join(trg)}\t{" ".join(pred)}\n')
                 cnt += 1
 
+        with open(f'{write_fp}.{mode}_src_pred.tsv', 'w', encoding='utf-8') as fp:
+            for pred, trg, _, _, src, _, _, _ in outputs:
+                fp.write(
+                    f'{"".join(src[1:-1])}\t{" ".join(pred)}\n')
+                cnt += 1
+
         with open(f'{write_fp}.{mode}_copy-probs.tsv', 'w', encoding='utf-8') as fp:
             fp.write(f'source\ttarget\tprediction\tdist\n')
             for pred, trg, _, _, src, p_gen, copy_prob, gen_prob in outputs:
