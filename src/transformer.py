@@ -7,8 +7,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Distribution
+from torch.nn.modules.transformer import _get_clones
 
-from dataloader import BOS_IDX, EOS_IDX, PAD_IDX, STEP_IDX
+from src.dataloader import BOS_IDX, EOS_IDX, PAD_IDX, STEP_IDX, UNK_IDX
+from src.util import get_source_to_target_mapping, get_aligned_source_to_target_mapping
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -65,6 +67,45 @@ class SinusoidalPositionalEmbedding(nn.Module):
         positions = torch.cumsum(mask, dim=0) * mask + self.padding_idx
         return self.weights.index_select(0, positions.view(-1)).view(
             bsz, seq_len, -1).detach()
+
+
+class TransformerEncoder(nn.Module):
+    r"""TransformerEncoder is a stack of N encoder layers
+
+    Args:
+        encoder_layer: an instance of the TransformerEncoderLayer() class (required).
+        num_layers: the number of sub-encoder-layers in the encoder (required).
+        norm: the layer normalization component (optional).
+
+    """
+
+    def __init__(self, encoder_layer, num_layers, norm=None):
+        super(TransformerEncoder, self).__init__()
+        self.layers = _get_clones(encoder_layer, num_layers)
+        self.num_layers = num_layers
+        self.norm = norm
+
+    def forward(self, src, mask=None, src_key_padding_mask=None):
+        r"""Pass the input through the encoder layers in turn.
+
+        Args:
+            src: the sequnce to the encoder (required).
+            mask: the mask for the src sequence (optional).
+            src_key_padding_mask: the mask for the src keys per batch (optional).
+
+        Shape:
+            see the docs in Transformer class.
+        """
+        output = src
+
+        for i in range(self.num_layers):
+            output = self.layers[i](output, src_mask=mask,
+                                    src_key_padding_mask=src_key_padding_mask)
+
+        if self.norm:
+            output = self.norm(output)
+
+        return output
 
 
 class TransformerEncoderLayer(nn.Module):
@@ -124,6 +165,52 @@ class TransformerEncoderLayer(nn.Module):
         if not self.normalize_before:
             src = self.norm2(src)
         return src
+
+
+class TransformerDecoder(nn.Module):
+    r"""TransformerDecoder is a stack of N decoder layers
+
+    Args:
+        decoder_layer: an instance of the TransformerDecoderLayer() class (required).
+        num_layers: the number of sub-decoder-layers in the decoder (required).
+        norm: the layer normalization component (optional).
+
+    """
+
+    def __init__(self, decoder_layer, num_layers, norm=None):
+        super(TransformerDecoder, self).__init__()
+        self.layers = _get_clones(decoder_layer, num_layers)
+        self.num_layers = num_layers
+        self.norm = norm
+
+    def forward(self, tgt, memory, tgt_mask=None,
+                memory_mask=None, tgt_key_padding_mask=None,
+                memory_key_padding_mask=None):
+        r"""Pass the inputs (and mask) through the decoder layer in turn.
+
+        Args:
+            tgt: the sequence to the decoder (required).
+            memory: the sequnce from the last layer of the encoder (required).
+            tgt_mask: the mask for the tgt sequence (optional).
+            memory_mask: the mask for the memory sequence (optional).
+            tgt_key_padding_mask: the mask for the tgt keys per batch (optional).
+            memory_key_padding_mask: the mask for the memory keys per batch (optional).
+
+        Shape:
+            see the docs in Transformer class.
+        """
+        output = tgt
+
+        for i in range(self.num_layers):
+            output, attn_weights = self.layers[i](output, memory, tgt_mask=tgt_mask,
+                                                  memory_mask=memory_mask,
+                                                  tgt_key_padding_mask=tgt_key_padding_mask,
+                                                  memory_key_padding_mask=memory_key_padding_mask)
+
+        if self.norm:
+            output = self.norm(output)
+
+        return output, attn_weights
 
 
 class TransformerDecoderLayer(nn.Module):
@@ -189,11 +276,11 @@ class TransformerDecoderLayer(nn.Module):
         residual = tgt
         if self.normalize_before:
             tgt = self.norm2(tgt)
-        tgt = self.multihead_attn(tgt,
+        tgt, attn_weights = self.multihead_attn(tgt,
                                   memory,
                                   memory,
                                   attn_mask=memory_mask,
-                                  key_padding_mask=memory_key_padding_mask)[0]
+                                  key_padding_mask=memory_key_padding_mask)
         tgt = residual + self.dropout(tgt)
         if not self.normalize_before:
             tgt = self.norm2(tgt)
@@ -207,14 +294,14 @@ class TransformerDecoderLayer(nn.Module):
         tgt = residual + self.dropout(tgt)
         if not self.normalize_before:
             tgt = self.norm3(tgt)
-        return tgt
+        return tgt, attn_weights
 
 
 class Transformer(nn.Module):
     def __init__(self, *, src_vocab_size, trg_vocab_size, embed_dim, nb_heads,
                  src_hid_size, src_nb_layers, trg_hid_size, trg_nb_layers,
                  dropout_p, tie_trg_embed, src_c2i, trg_c2i, attr_c2i,
-                 label_smooth, **kwargs):
+                 label_smooth, use_copy, align, no_scale, **kwargs):
         '''
         init
         '''
@@ -232,6 +319,9 @@ class Transformer(nn.Module):
         self.tie_trg_embed = tie_trg_embed
         self.label_smooth = label_smooth
         self.src_c2i, self.trg_c2i, self.attr_c2i = src_c2i, trg_c2i, attr_c2i
+        self.use_copy = use_copy
+        self.no_scale = no_scale
+
         self.src_embed = Embedding(src_vocab_size,
                                    embed_dim,
                                    padding_idx=PAD_IDX)
@@ -246,9 +336,9 @@ class Transformer(nn.Module):
                                                 attention_dropout=dropout_p,
                                                 activation_dropout=dropout_p,
                                                 normalize_before=True)
-        self.encoder = nn.TransformerEncoder(encoder_layer,
-                                             num_layers=src_nb_layers,
-                                             norm=nn.LayerNorm(embed_dim))
+        self.encoder = TransformerEncoder(encoder_layer,
+                                          num_layers=src_nb_layers,
+                                          norm=nn.LayerNorm(embed_dim))
         decoder_layer = TransformerDecoderLayer(d_model=embed_dim,
                                                 nhead=nb_heads,
                                                 dim_feedforward=trg_hid_size,
@@ -256,38 +346,92 @@ class Transformer(nn.Module):
                                                 attention_dropout=dropout_p,
                                                 activation_dropout=dropout_p,
                                                 normalize_before=True)
-        self.decoder = nn.TransformerDecoder(decoder_layer,
-                                             num_layers=trg_nb_layers,
-                                             norm=nn.LayerNorm(embed_dim))
+        self.decoder = TransformerDecoder(decoder_layer,
+                                          num_layers=trg_nb_layers,
+                                          norm=nn.LayerNorm(embed_dim))
         self.final_out = Linear(embed_dim, trg_vocab_size)
         if tie_trg_embed:
             self.final_out.weight = self.trg_embed.weight
         self.dropout = nn.Dropout(dropout_p)
+
+        self.generate_prob = nn.Linear(embed_dim * 3, 1)
+
+        if align:
+            self.src_tgt_map = get_aligned_source_to_target_mapping(self.src_c2i, self.trg_c2i, align)
+
         # self._reset_parameters()
 
     def embed(self, src_batch, src_mask):
-        word_embed = self.embed_scale * self.src_embed(src_batch)
+        if self.no_scale:
+            word_embed = self.src_embed(src_batch)
+        else:
+            word_embed = self.embed_scale * self.src_embed(src_batch)
         pos_embed = self.position_embed(src_batch)
         embed = self.dropout(word_embed + pos_embed)
         return embed
+
+    def get_copy(self, src, attn_weights, output_shape, src_tgt_map):
+        copy = torch.zeros(output_shape)
+
+        if torch.cuda.is_available():
+            copy = copy.cuda()
+
+        src_tile = src.transpose(0, 1).unsqueeze(1).repeat(1, copy.size(1), 1)
+
+        mapped_tile = torch.tensor(np.vectorize(lambda x: src_tgt_map.get(x, UNK_IDX))(np.array(src_tile.cpu()))).long()
+
+        if torch.cuda.is_available():
+            mapped_tile = mapped_tile.cuda()
+            attn_weights = attn_weights.cuda()
+
+        copy = copy.scatter_add(2, mapped_tile, attn_weights)
+
+        return copy
 
     def encode(self, src_batch, src_mask):
         embed = self.embed(src_batch, src_mask)
         return self.encoder(embed, src_key_padding_mask=src_mask)
 
     def decode(self, enc_hs, src_mask, trg_batch, trg_mask):
-        word_embed = self.embed_scale * self.trg_embed(trg_batch)
+        if self.no_scale:
+            word_embed = self.trg_embed(trg_batch)
+        else:
+            word_embed = self.embed_scale * self.trg_embed(trg_batch)
         pos_embed = self.position_embed(trg_batch)
         embed = self.dropout(word_embed + pos_embed)
 
         trg_seq_len = trg_batch.size(0)
         causal_mask = self.generate_square_subsequent_mask(trg_seq_len)
-        dec_hs = self.decoder(embed,
-                              enc_hs,
-                              tgt_mask=causal_mask,
-                              tgt_key_padding_mask=trg_mask,
-                              memory_key_padding_mask=src_mask)
-        return F.log_softmax(self.final_out(dec_hs), dim=-1)
+        dec_hs, attn_weights = self.decoder(embed, enc_hs, tgt_mask=causal_mask, tgt_key_padding_mask=trg_mask,
+                                            memory_key_padding_mask=src_mask)
+
+        return dec_hs, attn_weights, embed
+
+    def source_weighted_output(self, src_batch, output, attn_weights, enc_hs, dec_hs, embed_tgt):
+        context = torch.bmm(attn_weights, enc_hs.transpose(0, 1))
+
+        gen_prob = torch.sigmoid(self.generate_prob(torch.cat([context,
+                                                               dec_hs.transpose(0, 1),
+                                                               embed_tgt.transpose(0, 1)], axis=2).squeeze()).squeeze())
+
+
+        copy = self.get_copy(src_batch, attn_weights, output.transpose(0, 1).shape, self.src_tgt_map)
+
+        if gen_prob.dim() == 0:
+            gen_prob = gen_prob.unsqueeze(0)
+
+        if gen_prob.dim() == 1:
+            gen_prob = gen_prob.unsqueeze(0)
+
+        gen_prob = gen_prob.unsqueeze(1)
+
+        output_sf = F.softmax(output.transpose(0, 1), dim=-1)
+
+        weighted_output = (gen_prob*output_sf.transpose(1, 2) + (1-gen_prob)*copy.transpose(1, 2)).transpose(1, 2)
+
+        return torch.log(weighted_output.transpose(0, 1)), \
+               [gen_prob, ((1-gen_prob)*copy.transpose(1, 2)).transpose(1, 2).transpose(0, 1),
+                (gen_prob*output.transpose(0, 1).transpose(1, 2)).transpose(1, 2)]
 
     def forward(self, src_batch, src_mask, trg_batch, trg_mask):
         '''
@@ -295,11 +439,16 @@ class Transformer(nn.Module):
         '''
         src_mask = (src_mask == 0).transpose(0, 1)
         trg_mask = (trg_mask == 0).transpose(0, 1)
-        # trg_seq_len, batch_size = trg_batch.size()
         enc_hs = self.encode(src_batch, src_mask)
-        # output: [trg_seq_len, batch_size, vocab_siz]
-        output = self.decode(enc_hs, src_mask, trg_batch, trg_mask)
-        return output
+
+        dec_hs, attn_weights, embed_tgt = self.decode(enc_hs, src_mask, trg_batch, trg_mask)
+
+        output = self.final_out(dec_hs)
+
+        if not self.use_copy:
+            return F.log_softmax(output, dim=-1), None
+
+        return self.source_weighted_output(src_batch, output, attn_weights, enc_hs, dec_hs, embed_tgt)
 
     def count_nb_params(self):
         model_parameters = filter(lambda p: p.requires_grad, self.parameters())
@@ -323,7 +472,7 @@ class Transformer(nn.Module):
 
     def get_loss(self, data):
         src, src_mask, trg, trg_mask = data
-        out = self.forward(src, src_mask, trg, trg_mask)
+        out, _ = self.forward(src, src_mask, trg, trg_mask)
         loss = self.loss(out[:-1], trg[1:])
         return loss
 

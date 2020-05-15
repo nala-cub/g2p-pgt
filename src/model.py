@@ -767,5 +767,5 @@ def dummy_mask(seq):
     '''
     if isinstance(seq, tuple):
         seq = seq[0]
-    assert len(seq.size()) == 1 or (len(seq.size()) == 2 and seq.size(1) == 1)
+    # assert len(seq.size()) == 1 or (len(seq.size()) == 2 and seq.size(1) == 1)
     return torch.ones_like(seq, dtype=torch.float)

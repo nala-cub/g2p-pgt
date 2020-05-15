@@ -3,10 +3,11 @@ from functools import partial
 
 import torch
 
-import util
-from dataloader import BOS_IDX, EOS_IDX, STEP_IDX
-from model import Categorical, HardMonoTransducer, HMMTransducer, dummy_mask
-from transformer import Transformer
+from src import util
+from src.dataloader import BOS_IDX, EOS_IDX, STEP_IDX
+from src.model import Categorical, HardMonoTransducer, HMMTransducer, dummy_mask
+from src.transformer import Transformer
+import torch.nn.functional as F
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -51,11 +52,12 @@ class Decoder(object):
         if key in self.cache:
             return self.cache[key]
         if self.type == Decode.greedy:
-            output, attns = decode_greedy(transducer,
+            output, gen_prob, attns = decode_greedy(transducer,
                                           src_sentence,
                                           max_len=self.max_len,
                                           trg_bos=self.trg_bos,
                                           trg_eos=self.trg_eos)
+            return output, gen_prob, attns
         elif self.type == Decode.beam:
             output, attns = decode_beam_search(transducer,
                                                src_sentence,
@@ -298,24 +300,40 @@ def decode_greedy_transformer(transducer,
     src_mask = dummy_mask(src_sentence)
     src_mask = (src_mask == 0).transpose(0, 1)
     enc_hs = transducer.encode(src_sentence, src_mask)
-
     output, attns = [trg_bos], []
 
+    gen_prob = None
     for _ in range(max_len):
         output_tensor = torch.tensor(output,
                                      device=DEVICE).view(len(output), 1)
         trg_mask = dummy_mask(output_tensor)
         trg_mask = (trg_mask == 0).transpose(0, 1)
 
-        word_logprob = transducer.decode(enc_hs, src_mask, output_tensor,
-                                         trg_mask)
+        src_mask_i = src_mask[:len(output)]
+        enc_hs_i = enc_hs[:, :len(output)]
+        src_sentence_i = src_sentence[:, :len(output)]
+        dec_hs, attn_weights, embed_tgt = transducer.decode(enc_hs_i, src_mask_i, output_tensor, trg_mask)
+
+        t_output = transducer.final_out(dec_hs)
+
+        if not transducer.use_copy:
+            word_logprob = F.log_softmax(t_output, dim=-1)
+        else:
+            # word_logprob, gen_prob = transducer.source_weighted_output(src_sentence, t_output, attn_weights, enc_hs,
+            # dec_hs, embed_tgt)
+            word_logprob, gen_prob = transducer.source_weighted_output(src_sentence_i, t_output, attn_weights, enc_hs_i,
+                                                                       dec_hs, embed_tgt)
+
+        # word_logprob = F.log_softmax(word_logprob, dim=-1)
+
         word_logprob = word_logprob[-1]
 
         word = torch.max(word_logprob, dim=1)[1]
         if word == trg_eos:
             break
         output.append(word.item())
-    return output[1:], attns
+
+    return output[1:], gen_prob, attns
 
 
 Beam = namedtuple('Beam', 'seq_len log_prob hidden input partial_sent attn')

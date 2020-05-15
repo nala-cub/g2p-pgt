@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from align import Aligner
+# from src.align import Aligner
 
 BOS = '<s>'
 EOS = '<\s>'
@@ -16,6 +16,9 @@ PAD = '<PAD>'
 UNK = '<UNK>'
 ALIGN = '<a>'
 STEP = '<step>'
+EX = '!'
+QU = '?'
+
 PAD_IDX = 0
 BOS_IDX = 1
 EOS_IDX = 2

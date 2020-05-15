@@ -1,6 +1,7 @@
 import logging
 import math
 import os
+import pickle
 import random
 import string
 import sys
@@ -17,6 +18,8 @@ from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 
 from dataloader import BOS_IDX, EOS_IDX, STEP_IDX
+
+from src.dataloader import BOS, EOS, PAD, UNK, EX, QU
 
 tqdm = partial(tqdm, bar_format='{l_bar}{r_bar}')
 
@@ -161,8 +164,20 @@ class BasicEvaluator(Evaluator):
         evaluate all instances
         '''
         correct, distance, nb_sample = 0, 0, 0
-        for src, trg in tqdm(data_iter(), total=nb_data):
-            pred, _ = decode_fn(model, src)
+
+        if True or nb_data == 1:
+        # if nb_data == 1:
+                data_gen = data_iter()
+        else:
+            data_gen = data_iter(nb_data)
+
+        for data in tqdm(data_gen, total=nb_data):
+            if True or nb_data == 1:
+            # if nb_data == 1:
+                src, trg = data
+            else:
+                src, _, trg, _ = data
+            pred, _, _ = decode_fn(model, src)
             nb_sample += 1
             trg = trg.view(-1).tolist()
             trg = [x for x in trg if x != BOS_IDX and x != EOS_IDX]
@@ -190,8 +205,20 @@ class G2PEvaluator(BasicEvaluator):
 
     def evaluate_all(self, data_iter, nb_data, model, decode_fn):
         src_dict = defaultdict(list)
-        for src, trg in tqdm(data_iter(), total=nb_data):
-            pred, _ = decode_fn(model, src)
+        if True or nb_data == 1:
+        # if nb_data == 1:
+            data_gen = data_iter()
+        else:
+            data_gen = data_iter(nb_data)
+
+        for data in tqdm(data_gen, total=nb_data):
+            if True or nb_data == 1:
+            # if nb_data == 1:
+                src, trg = data
+            else:
+                src, _, trg, _ = data
+
+            pred, gen_prob_vals, _ = decode_fn(model, src)
             trg = trg.view(-1).tolist()
             trg = [x for x in trg if x != BOS_IDX and x != EOS_IDX]
             corr, dist = self.evaluate(pred, trg)
@@ -211,7 +238,7 @@ class G2PEvaluator(BasicEvaluator):
         distance = round(distance / nb_sample, 4)
         return [
             Eval('acc', 'accuracy', acc),
-            Eval('per', 'phenome error rate', distance)
+            Eval('per', 'phoneme error rate', distance)
         ]
 
 
@@ -243,7 +270,7 @@ class TranslitEvaluator(BasicEvaluator):
         evaluate all instances
         '''
         def helper(src, trgs):
-            pred, _ = decode_fn(model, src)
+            pred, gen_prob_vals, _ = decode_fn(model, src)
             best_corr, best_dist, closest_ref = 0, float('inf'), None
             for trg in trgs:
                 trg = trg[1:-1].view(-1)
@@ -309,3 +336,27 @@ def edit_distance(str1, str2):
             table[i][j] = min(table[i - 1][j] + 1, table[i][j - 1] + 1,
                               table[i - 1][j - 1] + dg)
     return int(table[len(str2)][len(str1)])
+
+
+def get_source_to_target_mapping(src_vocab, trg_vocab):
+    src_tgt_map = {}
+    for token in src_vocab:
+        src_tgt_map[src_vocab[token]] = trg_vocab.get(token, trg_vocab.get(UNK))
+
+    return src_tgt_map
+
+
+def get_aligned_source_to_target_mapping(src_vocab, trg_vocab, align_path):
+    align_dict = pickle.load(open(align_path, 'rb'))
+
+    src_tgt_map = {}
+    for token in src_vocab:
+        if token in [BOS, EOS, PAD, UNK, EX, QU]:
+            src_tgt_map[src_vocab[token]] = trg_vocab.get(token, trg_vocab.get(UNK))
+        else:
+            if align_dict.get(token):
+                src_tgt_map[src_vocab[token]] = trg_vocab[align_dict[token][0]]
+            else:
+                src_tgt_map[src_vocab[token]] = trg_vocab.get(token, trg_vocab.get(UNK))
+
+    return src_tgt_map
