@@ -2,7 +2,7 @@
 
 ## Task 1
 
-This repository is a fork of the vanilla transformer implementation of shijie-wu, providing the extra features of Multi-tasking for G2P (Grapheme-to-Phoneme Conversion) and P2G (Phoneme-to-Grapheme Conversion), and a pointer-generator copy-mechanism.
+This repository is a fork of the vanilla transformer [implementation](https://github.com/shijie-wu/neural-transducer) of shijie-wu, providing the extra features of Multi-tasking for G2P (Grapheme-to-Phoneme Conversion) and P2G (Phoneme-to-Grapheme Conversion), and a pointer-generator copy-mechanism.
 
 
 ## Dependencies
